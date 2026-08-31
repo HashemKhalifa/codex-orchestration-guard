@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "evidence_class": "live_configuration_and_enforcement_smoke",
+  "complete_period": false,
+  "root": {
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "high",
+    "model_calls": 3,
+    "input_tokens": 96678,
+    "cached_input_tokens": 69888,
+    "effective_context_window": 258400
+  },
+  "child": {
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "high",
+    "model_calls": 2,
+    "input_tokens": 76246,
+    "cached_input_tokens": 58880,
+    "effective_context_window": 258400,
+    "nested_spawn_attempt": "denied",
+    "grandchild_started": false
+  }
+}

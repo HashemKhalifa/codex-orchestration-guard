@@ -1,0 +1,38 @@
+{
+  "name": "codex-orchestration-guard",
+  "version": "0.1.0",
+  "description": "Bounds Codex agent fan-out, scope drift, context growth, and local usage reporting.",
+  "author": {
+    "name": "Hashem Khalifa",
+    "url": "https://github.com/HashemKhalifa"
+  },
+  "homepage": "https://github.com/HashemKhalifa/codex-orchestration-guard",
+  "repository": "https://github.com/HashemKhalifa/codex-orchestration-guard",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "subagents",
+    "hooks",
+    "token-usage",
+    "scope-control"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Orchestration Guard",
+    "shortDescription": "Bound agent fan-out, context growth, and scope drift.",
+    "longDescription": "Adds local hooks that prevent recursive delegation, cap direct agents, and inject a one-outcome scope contract. Includes privacy-safe usage snapshots and comparisons.",
+    "developerName": "Hashem Khalifa",
+    "category": "Productivity",
+    "capabilities": [
+      "Hooks",
+      "Skills",
+      "Local metrics"
+    ],
+    "websiteURL": "https://github.com/HashemKhalifa/codex-orchestration-guard",
+    "defaultPrompt": [
+      "Audit my Codex usage and agent fan-out.",
+      "Configure bounded Terra subagents.",
+      "Compare Codex usage before and after."
+    ]
+  }
+}

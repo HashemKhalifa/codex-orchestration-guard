@@ -1,0 +1,51 @@
+{
+  "average_input_tokens_per_call": 185541.3,
+  "cached_input_tokens": 1658385920,
+  "child_sessions": 62,
+  "complete_period": true,
+  "context_windows": {
+    "828400": 9133
+  },
+  "estimated_credits": 21463.44609,
+  "input_tokens": 1694548686,
+  "max_agent_depth": 6,
+  "model_calls": 9133,
+  "models": {
+    "gpt-5.6-sol": {
+      "cached_input_tokens": 1588942848,
+      "calls": 8662,
+      "estimated_credits": 20841.11078,
+      "input_tokens": 1620806821,
+      "output_tokens": 3530570
+    },
+    "gpt-5.6-terra": {
+      "cached_input_tokens": 69443072,
+      "calls": 471,
+      "estimated_credits": 622.33531,
+      "input_tokens": 73741865,
+      "output_tokens": 200601
+    }
+  },
+  "output_tokens": 3731171,
+  "period": {
+    "date": "2026-08-30",
+    "timezone": "Europe/Berlin"
+  },
+  "quota": {
+    "first_percent": 2.0,
+    "last_percent": 99.0,
+    "peak_percent": 100.0,
+    "percentage_point_change": 97.0,
+    "window_minutes": 10080
+  },
+  "rate_card": {
+    "date": "2026-08-31",
+    "unit": "credits_per_million_tokens"
+  },
+  "reasoning_output_tokens": 2028121,
+  "root_sessions": 17,
+  "schema_version": 1,
+  "sessions": 72,
+  "uncached_input_tokens": 36162766,
+  "unknown_model_calls": 0
+}
