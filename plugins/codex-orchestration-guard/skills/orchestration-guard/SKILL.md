@@ -1,54 +1,42 @@
 ---
 name: orchestration-guard
-description: Configure or inspect bounded Codex delegation, scope drift controls, native context defaults, and aggregate usage metrics. Use when a user asks why Codex usage is high, wants to prevent recursive agents or over-engineering, or wants before-and-after token data.
+description: Configure or inspect bounded local Codex delegation, scope guidance, and usage snapshots with explicit source and pricing coverage.
 ---
 
 # Codex orchestration guard
 
-Use this skill to inspect or configure the plugin. The hooks enforce the runtime policy automatically.
+Inspect the installed version and hook trust before relying on policy enforcement. New sessions load updated plugin settings.
 
 ## Runtime policy
 
-- Choose one route per root session: task threads or a subagent tree.
-- Limit a subagent tree to four workers and one reviewer.
-- Block agent-created children from spawning more children.
-- Inject one scope contract at session start. Complete one requested outcome, avoid optional hardening, run one bounded verification set, and stop when the outcome is proven.
-- Accept a one-turn exception only when the operator writes `[allow-agent-orchestration]` in a direct prompt. Remove this marker from agent-created task prompts.
+- One delegation route per retained root session, task threads or native subagents.
+- Five permitted direct subagent attempts, without worker/reviewer classification.
+- Known children cannot delegate. Unresolved identity blocks delegation.
+- Stable spawn call IDs deduplicate accounting. Missing IDs count as attempts. Failed or ambiguous outcomes do not refund attempts.
+- Prompt markers, including `[allow-agent-orchestration]`, do not grant exceptions in 0.2.0.
+- Scope text is guidance. Hooks are local guardrails, not a complete security boundary.
 
-## Recommended Codex configuration
-
-Inspect `~/.codex/config.toml`. Recommend this `[agents]` block:
-
-```toml
-[agents]
-enabled = true
-max_concurrent_threads_per_session = 5
-default_subagent_model = "gpt-5.6-terra"
-default_subagent_reasoning_effort = "high"
-```
-
-Remove top-level `model_context_window` and `model_auto_compact_token_limit` overrides when the user wants Codex-managed context defaults. Preserve unrelated settings.
-
-Do not edit configuration unless the user asks for the change. New settings apply to new sessions; existing sessions retain their loaded context.
+Preserve existing counters and routes on upgrade. Treat malformed retained state as an error, not permission to erase the store. Do not modify configuration unless the user requests it.
 
 ## Metrics
 
-Create an aggregate snapshot without prompts, paths, or thread IDs:
-
 ```bash
 python3 "$PLUGIN_ROOT/scripts/usage_metrics.py" snapshot \
-  --date 2026-08-31 \
+  --date 2026-09-20 \
   --timezone Europe/Berlin \
-  --output usage-2026-08-31.json
+  --output usage-after.json
 ```
 
-Compare two snapshots:
+The supported source scope is JSONL below the selected Codex home's `sessions/` tree. Filter by event time rather than session start date. Do not claim account-wide coverage.
+
+Schema 2 separates `period_closed`, `source_coverage`, and pricing coverage. `pricing.known_rate_subtotal` is a partial estimate. `pricing.observed_total` is unavailable when any usage is unpriced. Never interpret an unknown model's cost as zero.
 
 ```bash
 python3 "$PLUGIN_ROOT/scripts/usage_metrics.py" compare \
   --before usage-before.json \
   --after usage-after.json \
+  --attest-comparable \
   --format markdown
 ```
 
-Treat estimated credits as a model-rate estimate, not an account invoice. Label non-equivalent workloads and counterfactual replays clearly.
+Use `--attest-comparable` only after establishing comparable completed work. Report token and cost comparison availability separately. Do not convert historical schema-1 snapshots into complete coverage assertions. Report actual host verification separately from reducer tests and savings evidence.

@@ -1,34 +1,46 @@
 # Codex Orchestration Guard
 
-Codex Orchestration Guard is a local Codex plugin that limits recursive delegation, caps direct agents, and adds a small scope contract at session start. It also exports aggregate usage metrics without prompts, paths, or thread IDs.
+Local Codex hooks restrict recursive delegation, cap direct subagent attempts, and add scope guidance. An offline command reports local usage with source and pricing coverage.
 
-## What it changes
+## Policy
 
-- A root session chooses task threads or a subagent tree. It cannot use both routes.
-- A subagent tree can start four workers and one reviewer.
-- Agent-created tasks and subagents cannot create children.
-- An operator can allow one exceptional turn with `[allow-agent-orchestration]`.
-- Agent-created prompts cannot forge that operator marker.
-- Every session receives one short scope contract: complete one requested outcome, skip optional hardening, run one bounded verification set, and stop.
+- Each retained root session chooses task threads or native subagents. It cannot mix routes.
+- A root can make five permitted direct subagent attempts. The guard does not classify workers or reviewers and does not cap the task-thread route.
+- Known children cannot delegate again. Unresolved actor identity blocks delegation.
+- A repeated stable spawn call ID does not consume another attempt. Calls without an ID count as attempts. Failed or interrupted launches do not refund attempts.
+- Each session receives one short scope instruction. This is guidance, not enforced task completion.
 
-The plugin does not remove the context that every agent needs. It limits fan-out and prevents children from multiplying that context recursively.
+The policy depends on Codex invoking the hook and supplying recognizable events. It is not an account-wide limit or a security boundary against an agent that can modify local files or use unsupported tool paths.
+
+## Upgrade to 0.2.0
+
+`[allow-agent-orchestration]` no longer grants an exception. Prompt text cannot establish operator origin, and agent-sent follow-ups must not acquire authority by containing a marker. This is a deliberate behavior change from 0.1.0.
+
+Existing retained counters, routes, and child records survive migration. A missing state file starts a new local store; malformed existing state blocks delegation instead of silently resetting it. State retention remains eight days.
+
+Usage snapshots now use schema 2. Historical schema-1 benchmark files remain unchanged and cannot be used as evidence of complete source or pricing coverage in the new comparison command.
 
 ## Install
-
-Add the GitHub repository as a Codex marketplace:
 
 ```bash
 codex plugin marketplace add HashemKhalifa/codex-orchestration-guard
 codex plugin add codex-orchestration-guard@codex-orchestration-guard
 ```
 
-Start a new Codex session. Open `/hooks`, review the plugin commands, and trust them before relying on enforcement.
+For an existing installation, refresh the marketplace and reinstall:
 
-If you already run a manual copy of this guard from `~/.codex/hooks.json`, remove or disable that hook before installing the plugin. Do not stack both copies.
+```bash
+codex plugin marketplace upgrade codex-orchestration-guard
+codex plugin add codex-orchestration-guard@codex-orchestration-guard
+```
 
-## Configure efficient subagents
+Start a new Codex session. Open `/hooks`, review the commands, and trust them before relying on enforcement. Installation and hook trust are separate.
 
-The hooks enforce routing and nesting. Add these settings to `~/.codex/config.toml` to make Terra/High the default for spawned agents:
+Disable any manual copy in `~/.codex/hooks.json` before enabling the plugin. Do not stack both copies.
+
+## Configure subagents
+
+The hooks do not select a model. These optional settings configure the host defaults:
 
 ```toml
 [agents]
@@ -38,22 +50,28 @@ default_subagent_model = "gpt-5.6-terra"
 default_subagent_reasoning_effort = "high"
 ```
 
-To restore Codex-managed context behavior, remove top-level `model_context_window` and `model_auto_compact_token_limit` overrides. Existing sessions keep their loaded settings. Test with a new session.
+The host's concurrency limit and the guard's retained attempt count are different limits. Explicit spawn settings and agent profiles can override model defaults. See the [Codex subagent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 
-Explicit spawn settings and custom agent files can override the default model. See the [Codex subagent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
-
-## Measure usage
-
-Create a local aggregate snapshot from a repository checkout:
+## Measure local usage
 
 ```bash
 python3 plugins/codex-orchestration-guard/scripts/usage_metrics.py snapshot \
-  --date 2026-08-31 \
+  --date 2026-09-20 \
   --timezone Europe/Berlin \
   --output usage-after.json
 ```
 
-Compare complete, equal-length periods with similar work. The command refuses to calculate savings when either snapshot is partial:
+Discovery scans supported JSONL files recursively below the selected Codex home's `sessions/` directory and filters events by their timestamps. A session can contribute usage even if it started days before the requested period. Archived or remote data outside that source tree is not included.
+
+A schema-2 snapshot separates:
+
+- `period_closed`, which says whether the interval has ended.
+- `source_coverage`, which reports discovered, readable, parsed, interval-bearing, unreadable, and unsupported inputs, plus traversal and parse errors.
+- `pricing.known_rate_subtotal`, which prices only models in the dated rate card.
+- `pricing.observed_total`, which is `null` when any observed usage has an unknown rate.
+- Unpriced call and token counts, which make missing price coverage visible.
+
+No supported input is different from a successfully observed period with no usage. Local source coverage is not proof of complete account usage. The dated rate card is an estimate, not an invoice, and does not invent prices for new models.
 
 ```bash
 python3 plugins/codex-orchestration-guard/scripts/usage_metrics.py compare \
@@ -63,23 +81,22 @@ python3 plugins/codex-orchestration-guard/scripts/usage_metrics.py compare \
   --format markdown
 ```
 
-Use `--attest-comparable` only after checking equal duration, timezone, model mix, and similar completed work.
+Comparison checks schema, closed intervals, duration, timezone, source coverage, and rate-card compatibility. Token and cost comparisons have separate availability flags. Unknown pricing prevents a cost comparison. `--attest-comparable` still requires you to establish similar completed work; the tool cannot infer it from token totals.
 
-The command reads local Codex rollout files and writes aggregates only. It does not upload data. Estimated credits use a dated local rate card and are not an invoice.
+Snapshots export aggregates without prompts, transcript text, file paths, thread IDs, or account identifiers. Nothing is uploaded. See [METRICS.md](METRICS.md) for the historical evidence and its limitations.
 
-See [METRICS.md](METRICS.md) for the initial evidence and its limitations.
+## Validate
 
-## Test
+The hook command uses `/usr/bin/python3`. Python 3.9 is supported, including the macOS system interpreter.
 
 ```bash
+/usr/bin/python3 -m unittest discover -s tests -v
 python3 -m unittest discover -s tests -v
 python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py \
   plugins/codex-orchestration-guard
 ```
 
-## Security
-
-Codex hooks can run outside the sandbox. Review the exact hook definitions before trusting them. The guard stores route counters and denial metadata under `PLUGIN_DATA`. It does not store prompts.
+Tests cover policy decisions and executable state handling. Actual host compatibility and its limits are recorded in [COMPATIBILITY.md](COMPATIBILITY.md). A returned denial object alone does not prove that a host prevented a launch.
 
 ## License
 

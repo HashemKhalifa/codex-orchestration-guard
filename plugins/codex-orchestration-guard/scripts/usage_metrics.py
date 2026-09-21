@@ -5,37 +5,50 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-RATE_CARD_DATE = "2026-08-31"
+RATE_CARD_ID = "2026-08-31"
+RATE_CARD_DATE = RATE_CARD_ID
 RATES = {
     "gpt-5.6-sol": {"input": 100.0, "cached": 10.0, "output": 500.0},
     "gpt-5.6-terra": {"input": 50.0, "cached": 5.0, "output": 300.0},
     "gpt-5.6-luna": {"input": 5.0, "cached": 0.5, "output": 30.0},
 }
-COMPARISON_FIELDS = (
+SOURCE_SCOPE = "local_sessions_jsonl"
+TOKEN_COMPARISON_FIELDS = (
     "sessions",
     "child_sessions",
     "model_calls",
     "input_tokens",
     "cached_input_tokens",
     "output_tokens",
-    "estimated_credits",
 )
 
 
 def empty_summary() -> Dict[str, Any]:
     return {
-        "schema_version": 1,
-        "complete_period": False,
-        "rate_card": {"date": RATE_CARD_DATE, "unit": "credits_per_million_tokens"},
+        "schema_version": 2,
+        "period_closed": False,
+        "rate_card": {
+            "id": RATE_CARD_ID,
+            "unit": "credits_per_million_tokens",
+        },
+        "pricing": {
+            "rate_card_id": RATE_CARD_ID,
+            "known_rate_subtotal": 0.0,
+            "unpriced_calls": 0,
+            "unpriced_input_tokens": 0,
+            "unpriced_output_tokens": 0,
+            "observed_total": 0.0,
+        },
         "sessions": 0,
         "root_sessions": 0,
         "child_sessions": 0,
@@ -47,7 +60,6 @@ def empty_summary() -> Dict[str, Any]:
         "output_tokens": 0,
         "reasoning_output_tokens": 0,
         "average_input_tokens_per_call": 0.0,
-        "estimated_credits": 0.0,
         "unknown_model_calls": 0,
         "models": {},
         "context_windows": {},
@@ -72,7 +84,13 @@ def parse_timestamp(value: Any) -> Optional[datetime]:
         return None
 
 
-def token_credits(model: str, input_tokens: int, cached: int, output: int) -> Optional[float]:
+def iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def token_credits(
+    model: str, input_tokens: int, cached: int, output: int
+) -> Optional[float]:
     rates = RATES.get(model)
     if rates is None:
         return None
@@ -84,12 +102,55 @@ def token_credits(model: str, input_tokens: int, cached: int, output: int) -> Op
     ) / 1_000_000
 
 
+def _source_coverage(
+    paths: List[Path], discovery_errors: int = 0
+) -> Dict[str, Any]:
+    return {
+        "scope": SOURCE_SCOPE,
+        "status": "unavailable",
+        "discovered_files": len(paths),
+        "readable_files": 0,
+        "parsed_files": 0,
+        "interval_bearing_files": 0,
+        "unreadable_files": 0,
+        "discovery_errors": discovery_errors,
+        "parse_errors": 0,
+        "unsupported_inputs": 0,
+    }
+
+
+def _finish_coverage(coverage: Dict[str, Any]) -> None:
+    discovered = coverage["discovered_files"]
+    if discovered == 0 and coverage["discovery_errors"] == 0:
+        coverage["status"] = "unavailable"
+        return
+    complete = (
+        coverage["readable_files"] == discovered
+        and coverage["parsed_files"] == discovered
+        and coverage["unreadable_files"] == 0
+        and coverage["discovery_errors"] == 0
+        and coverage["parse_errors"] == 0
+        and coverage["unsupported_inputs"] == 0
+    )
+    coverage["status"] = "scanned_supported_set" if complete else "partial"
+
+
+def _usage_value(usage: Dict[str, Any], name: str) -> Optional[int]:
+    value = usage.get(name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def summarize_rollouts(
     paths: Iterable[Path],
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
+    discovery_errors: int = 0,
 ) -> Dict[str, Any]:
+    path_list = sorted(set(paths))
     summary = empty_summary()
+    coverage = _source_coverage(path_list, discovery_errors=discovery_errors)
     sessions = set()
     root_sessions = set()
     child_sessions = set()
@@ -101,97 +162,159 @@ def summarize_rollouts(
             "input_tokens": 0,
             "cached_input_tokens": 0,
             "output_tokens": 0,
-            "estimated_credits": 0.0,
+            "known_rate_subtotal": 0.0,
+            "unpriced_calls": 0,
+            "observed_total": 0.0,
         }
     )
 
-    for path in paths:
+    for path in path_list:
         identity = None
         depth = 0
         model = "unknown"
         file_has_usage = False
+        file_has_json_record = False
+        file_has_supported_record = False
+        file_bears_interval = False
         try:
-            lines = path.open("r", encoding="utf-8")
-        except OSError:
-            continue
-        with lines:
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                record_type = record.get("type")
-                payload = record.get("payload")
-                if record_type == "session_meta" and isinstance(payload, dict):
-                    candidate = payload.get("id")
-                    identity = candidate if isinstance(candidate, str) else None
-                    source = payload.get("source")
-                    if isinstance(source, dict):
-                        subagent = source.get("subagent")
-                        spawn = (
-                            subagent.get("thread_spawn")
-                            if isinstance(subagent, dict)
-                            else None
-                        )
-                        candidate_depth = (
-                            spawn.get("depth") if isinstance(spawn, dict) else None
-                        )
-                        if isinstance(candidate_depth, int):
-                            depth = candidate_depth
-                elif record_type == "turn_context" and isinstance(payload, dict):
-                    candidate_model = payload.get("model")
-                    if isinstance(candidate_model, str):
-                        model = candidate_model
-                elif (
-                    record_type == "event_msg"
-                    and isinstance(payload, dict)
-                    and payload.get("type") == "token_count"
-                ):
+            with path.open("r", encoding="utf-8") as lines:
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeError):
+                        coverage["parse_errors"] += 1
+                        continue
+                    if not isinstance(record, dict):
+                        coverage["parse_errors"] += 1
+                        continue
+                    file_has_json_record = True
                     timestamp = parse_timestamp(record.get("timestamp"))
+                    if timestamp is not None and (
+                        (start is None or timestamp >= start)
+                        and (end is None or timestamp < end)
+                    ):
+                        file_bears_interval = True
+
+                    record_type = record.get("type")
+                    payload = record.get("payload")
+                    if record_type == "session_meta" and isinstance(payload, dict):
+                        candidate = payload.get("id") or payload.get("session_id")
+                        if not isinstance(candidate, str) or not candidate:
+                            continue
+                        file_has_supported_record = True
+                        identity = candidate
+                        source = payload.get("source")
+                        if isinstance(source, dict):
+                            subagent = source.get("subagent")
+                            spawn = (
+                                subagent.get("thread_spawn")
+                                if isinstance(subagent, dict)
+                                else None
+                            )
+                            candidate_depth = (
+                                spawn.get("depth")
+                                if isinstance(spawn, dict)
+                                else None
+                            )
+                            if isinstance(candidate_depth, int):
+                                depth = candidate_depth
+                        continue
+                    if record_type == "turn_context" and isinstance(payload, dict):
+                        candidate_model = payload.get("model")
+                        if isinstance(candidate_model, str):
+                            model = candidate_model
+                        continue
+                    if (
+                        record_type != "event_msg"
+                        or not isinstance(payload, dict)
+                        or payload.get("type") != "token_count"
+                    ):
+                        continue
                     if timestamp is None:
-                        continue
-                    if start is not None and timestamp < start:
-                        continue
-                    if end is not None and timestamp >= end:
+                        coverage["unsupported_inputs"] += 1
                         continue
                     info = payload.get("info")
-                    usage = info.get("last_token_usage") if isinstance(info, dict) else None
+                    usage = (
+                        info.get("last_token_usage")
+                        if isinstance(info, dict)
+                        else None
+                    )
                     if not isinstance(usage, dict):
+                        coverage["unsupported_inputs"] += 1
                         continue
-                    input_tokens = int(usage.get("input_tokens") or 0)
-                    cached = int(usage.get("cached_input_tokens") or 0)
-                    output = int(usage.get("output_tokens") or 0)
-                    reasoning = int(usage.get("reasoning_output_tokens") or 0)
+
+                    input_tokens = _usage_value(usage, "input_tokens")
+                    cached = _usage_value(usage, "cached_input_tokens")
+                    output = _usage_value(usage, "output_tokens")
+                    reasoning = _usage_value(usage, "reasoning_output_tokens")
+                    if (
+                        input_tokens is None
+                        or cached is None
+                        or output is None
+                        or reasoning is None
+                        or cached > input_tokens
+                    ):
+                        coverage["unsupported_inputs"] += 1
+                        continue
+                    file_has_supported_record = True
+                    if (start is not None and timestamp < start) or (
+                        end is not None and timestamp >= end
+                    ):
+                        continue
                     file_has_usage = True
                     summary["model_calls"] += 1
                     summary["input_tokens"] += input_tokens
                     summary["cached_input_tokens"] += cached
                     summary["output_tokens"] += output
                     summary["reasoning_output_tokens"] += reasoning
-                    window = info.get("model_context_window") if isinstance(info, dict) else None
+                    window = info.get("model_context_window")
                     if isinstance(window, int):
                         context_windows[str(window)] += 1
+
                     credits = token_credits(model, input_tokens, cached, output)
-                    if credits is None:
-                        summary["unknown_model_calls"] += 1
-                        credits = 0.0
-                    summary["estimated_credits"] += credits
                     model_total = model_totals[model]
+                    if credits is None:
+                        summary["pricing"]["unpriced_calls"] += 1
+                        summary["pricing"]["unpriced_input_tokens"] += input_tokens
+                        summary["pricing"]["unpriced_output_tokens"] += output
+                        summary["unknown_model_calls"] += 1
+                        model_total["unpriced_calls"] += 1
+                        model_total["observed_total"] = None
+                    else:
+                        summary["pricing"]["known_rate_subtotal"] += credits
+                        model_total["known_rate_subtotal"] += credits
+                        if model_total["observed_total"] is not None:
+                            model_total["observed_total"] += credits
                     model_total["calls"] += 1
                     model_total["input_tokens"] += input_tokens
                     model_total["cached_input_tokens"] += cached
                     model_total["output_tokens"] += output
-                    model_total["estimated_credits"] += credits
+
                     limits = payload.get("rate_limits")
-                    primary = limits.get("primary") if isinstance(limits, dict) else None
+                    primary = (
+                        limits.get("primary") if isinstance(limits, dict) else None
+                    )
                     if isinstance(primary, dict):
                         used = primary.get("used_percent")
                         reset = primary.get("resets_at")
                         minutes = primary.get("window_minutes")
                         if isinstance(used, (int, float)) and isinstance(reset, int):
-                            quota_samples.append((timestamp, float(used), reset, minutes))
+                            quota_samples.append(
+                                (timestamp, float(used), reset, minutes)
+                            )
+        except (OSError, UnicodeError):
+            coverage["unreadable_files"] += 1
+        else:
+            coverage["readable_files"] += 1
+            if file_has_supported_record:
+                coverage["parsed_files"] += 1
+            elif file_has_json_record:
+                coverage["unsupported_inputs"] += 1
+            if file_bears_interval:
+                coverage["interval_bearing_files"] += 1
+
         if file_has_usage:
             stable_identity = identity or "file-count-only:{}".format(len(sessions))
             sessions.add(stable_identity)
@@ -211,9 +334,16 @@ def summarize_rollouts(
         summary["average_input_tokens_per_call"] = round(
             summary["input_tokens"] / summary["model_calls"], 2
         )
-    summary["estimated_credits"] = round(summary["estimated_credits"], 6)
+
+    subtotal = round(summary["pricing"]["known_rate_subtotal"], 6)
+    summary["pricing"]["known_rate_subtotal"] = subtotal
+    summary["pricing"]["observed_total"] = (
+        subtotal if summary["pricing"]["unpriced_calls"] == 0 else None
+    )
     for total in model_totals.values():
-        total["estimated_credits"] = round(total["estimated_credits"], 6)
+        total["known_rate_subtotal"] = round(total["known_rate_subtotal"], 6)
+        if total["observed_total"] is not None:
+            total["observed_total"] = round(total["observed_total"], 6)
     summary["models"] = dict(sorted(model_totals.items()))
     summary["context_windows"] = dict(sorted(context_windows.items()))
     if quota_samples:
@@ -229,7 +359,154 @@ def summarize_rollouts(
             "peak_percent": max(sample[1] for sample in current),
             "percentage_point_change": round(last[1] - first[1], 2),
         }
+    _finish_coverage(coverage)
+    summary["source_coverage"] = coverage
     return summary
+
+
+def discover_paths(codex_home: Path) -> Tuple[List[Path], int]:
+    sessions_root = codex_home / "sessions"
+    if not sessions_root.is_dir():
+        return [], 0
+    paths = []  # type: List[Path]
+    errors = []  # type: List[OSError]
+    for directory, _, filenames in os.walk(sessions_root, onerror=errors.append):
+        paths.extend(
+            Path(directory) / filename
+            for filename in filenames
+            if filename.endswith(".jsonl")
+        )
+    return sorted(set(paths)), len(errors)
+
+
+def snapshot_for_day(
+    codex_home: Path,
+    target_date: str,
+    timezone_name: str,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    local_date = date.fromisoformat(target_date)
+    start_local = datetime.combine(local_date, time.min).replace(tzinfo=zone)
+    end_local = datetime.combine(local_date + timedelta(days=1), time.min).replace(
+        tzinfo=zone
+    )
+    start = start_local.astimezone(timezone.utc)
+    end = end_local.astimezone(timezone.utc)
+    paths, discovery_errors = discover_paths(codex_home)
+    result = summarize_rollouts(
+        paths,
+        start=start,
+        end=end,
+        discovery_errors=discovery_errors,
+    )
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    result["period_closed"] = end <= current.astimezone(timezone.utc)
+    result["interval"] = {
+        "start_utc": iso_utc(start),
+        "end_utc": iso_utc(end),
+        "timezone": timezone_name,
+        "duration_seconds": int((end - start).total_seconds()),
+    }
+    return result
+
+
+def _change(before: float, after: float) -> Dict[str, Any]:
+    percent = None
+    if before != 0:
+        percent = round((after - before) * 100 / before, 2)
+    return {
+        "before": before,
+        "after": after,
+        "absolute_change": after - before,
+        "percent_change": percent,
+    }
+
+
+def _valid_interval(snapshot: Dict[str, Any]) -> bool:
+    interval = snapshot.get("interval")
+    if not isinstance(interval, dict):
+        return False
+    start = parse_timestamp(interval.get("start_utc"))
+    end = parse_timestamp(interval.get("end_utc"))
+    duration = interval.get("duration_seconds")
+    zone = interval.get("timezone")
+    if not isinstance(zone, str) or not zone:
+        return False
+    try:
+        ZoneInfo(zone)
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
+    return (
+        start is not None
+        and end is not None
+        and end > start
+        and isinstance(duration, (int, float))
+        and not isinstance(duration, bool)
+        and math.isfinite(duration)
+        and duration > 0
+        and int((end - start).total_seconds()) == int(duration)
+    )
+
+
+def _complete_source_coverage(snapshot: Dict[str, Any]) -> bool:
+    coverage = snapshot.get("source_coverage")
+    if not isinstance(coverage, dict):
+        return False
+    discovered = coverage.get("discovered_files")
+    count_fields = (
+        "discovered_files",
+        "readable_files",
+        "parsed_files",
+        "interval_bearing_files",
+        "unreadable_files",
+        "discovery_errors",
+        "parse_errors",
+        "unsupported_inputs",
+    )
+    return (
+        coverage.get("scope") == SOURCE_SCOPE
+        and coverage.get("status") == "scanned_supported_set"
+        and all(_nonnegative_integer(coverage.get(field)) for field in count_fields)
+        and discovered > 0
+        and coverage.get("readable_files") == discovered
+        and coverage.get("parsed_files") == discovered
+        and coverage.get("unreadable_files") == 0
+        and coverage.get("discovery_errors") == 0
+        and coverage.get("parse_errors") == 0
+        and coverage.get("unsupported_inputs") == 0
+    )
+
+
+def _nonnegative_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def _nonnegative_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _complete_pricing(snapshot: Dict[str, Any]) -> bool:
+    pricing = snapshot.get("pricing")
+    return (
+        isinstance(pricing, dict)
+        and _nonnegative_number(pricing.get("known_rate_subtotal"))
+        and _nonnegative_number(pricing.get("observed_total"))
+        and pricing.get("observed_total") == pricing.get("known_rate_subtotal")
+        and _nonnegative_integer(pricing.get("unpriced_calls"))
+        and pricing.get("unpriced_calls") == 0
+        and _nonnegative_integer(pricing.get("unpriced_input_tokens"))
+        and _nonnegative_integer(pricing.get("unpriced_output_tokens"))
+        and isinstance(pricing.get("rate_card_id"), str)
+        and bool(pricing.get("rate_card_id"))
+    )
 
 
 def compare_snapshots(
@@ -237,79 +514,119 @@ def compare_snapshots(
     after: Dict[str, Any],
     attested_comparable: bool = False,
 ) -> Dict[str, Any]:
-    if not before.get("complete_period") or not after.get("complete_period"):
-        return {
-            "comparable": False,
-            "reason": "Both snapshots must cover complete periods.",
-            "metrics": {},
-        }
-    if not attested_comparable:
-        return {
-            "comparable": False,
-            "reason": "Use --attest-comparable only after verifying similar work, duration, timezone, and model mix.",
-            "metrics": {},
-        }
-    comparison = {}  # type: Dict[str, Any]
-    for field in COMPARISON_FIELDS:
-        before_value = before.get(field, 0)
-        after_value = after.get(field, 0)
-        percent = None
-        if isinstance(before_value, (int, float)) and before_value != 0:
-            percent = round((after_value - before_value) * 100 / before_value, 2)
-        comparison[field] = {
-            "before": before_value,
-            "after": after_value,
-            "absolute_change": after_value - before_value,
-            "percent_change": percent,
-        }
-    return {"comparable": True, "reason": None, "metrics": comparison}
-
-
-def discover_paths(
-    codex_home: Path, target_date: date, zone: ZoneInfo
-) -> Tuple[List[Path], datetime, datetime]:
-    start_local = datetime.combine(target_date, time.min).replace(tzinfo=zone)
-    end_local = start_local + timedelta(days=1)
-    paths = []  # type: List[Path]
-    for day_offset in (-1, 0, 1):
-        candidate = target_date + timedelta(days=day_offset)
-        directory = (
-            codex_home
-            / "sessions"
-            / "{:04d}".format(candidate.year)
-            / "{:02d}".format(candidate.month)
-            / "{:02d}".format(candidate.day)
+    common_reasons = []  # type: List[str]
+    cost_reasons = []  # type: List[str]
+    schema_ok = before.get("schema_version") == 2 and after.get("schema_version") == 2
+    if not schema_ok:
+        common_reasons.append(
+            "Both snapshots must use schema 2 with explicit source coverage."
         )
-        if directory.is_dir():
-            paths.extend(directory.glob("*.jsonl"))
-    return sorted(set(paths)), start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+    if schema_ok:
+        if not before.get("period_closed") or not after.get("period_closed"):
+            common_reasons.append("Both snapshot intervals must be closed.")
+        if not _valid_interval(before) or not _valid_interval(after):
+            common_reasons.append(
+                "Both snapshots must contain valid interval duration and timestamps."
+            )
+        else:
+            before_interval = before["interval"]
+            after_interval = after["interval"]
+            if (
+                before_interval["duration_seconds"]
+                != after_interval["duration_seconds"]
+            ):
+                common_reasons.append("Snapshot interval duration must match.")
+            if before_interval["timezone"] != after_interval["timezone"]:
+                common_reasons.append("Snapshot timezone must match.")
+        if not _complete_source_coverage(
+            before
+        ) or not _complete_source_coverage(after):
+            common_reasons.append("Both snapshots require complete source coverage.")
+        if not all(
+            _nonnegative_integer(snapshot.get(field))
+            for snapshot in (before, after)
+            for field in TOKEN_COMPARISON_FIELDS
+        ):
+            common_reasons.append("Both snapshots require complete token metrics.")
+    if not attested_comparable:
+        common_reasons.append(
+            "Use --attest-comparable after verifying similar completed work "
+            "and model mix."
+        )
+
+    token_available = not common_reasons
+    if schema_ok:
+        if not _complete_pricing(before) or not _complete_pricing(after):
+            cost_reasons.append("Both snapshots require complete pricing coverage.")
+        else:
+            before_rate = before["pricing"]["rate_card_id"]
+            after_rate = after["pricing"]["rate_card_id"]
+            before_card = before.get("rate_card")
+            after_card = after.get("rate_card")
+            cards_match_snapshots = (
+                isinstance(before_card, dict)
+                and isinstance(after_card, dict)
+                and before_card.get("id") == before_rate
+                and after_card.get("id") == after_rate
+                and isinstance(before_card.get("unit"), str)
+                and bool(before_card.get("unit"))
+                and before_card.get("unit") == after_card.get("unit")
+            )
+            if before_rate != after_rate or not cards_match_snapshots:
+                cost_reasons.append("Snapshot rate card must match.")
+    cost_available = token_available and not cost_reasons
+
+    token_metrics = {}  # type: Dict[str, Any]
+    if token_available:
+        for field in TOKEN_COMPARISON_FIELDS:
+            token_metrics[field] = _change(before[field], after[field])
+    cost_metrics = {}  # type: Dict[str, Any]
+    if cost_available:
+        cost_metrics["observed_total"] = _change(
+            before["pricing"]["observed_total"],
+            after["pricing"]["observed_total"],
+        )
+    return {
+        "token_comparison_available": token_available,
+        "cost_comparison_available": cost_available,
+        "reasons": common_reasons + cost_reasons,
+        "token_metrics": token_metrics,
+        "cost_metrics": cost_metrics,
+    }
 
 
 def render_markdown(value: Dict[str, Any]) -> str:
     if "comparison" in value:
-        lines = ["# Codex usage comparison", ""]
         comparison = value["comparison"]
-        if not comparison.get("comparable"):
-            return "\n".join(lines + ["Comparison unavailable: {}".format(comparison["reason"])]) + "\n"
-        for field, result in comparison["metrics"].items():
-            lines.append(
-                "- `{}`: {} → {} ({}%)".format(
-                    field,
-                    result["before"],
-                    result["after"],
-                    result["percent_change"],
-                )
+        lines = ["# Codex usage comparison", ""]
+        if comparison["reasons"]:
+            lines.extend(
+                "- Unavailable: {}".format(reason)
+                for reason in comparison["reasons"]
             )
+        for section in ("token_metrics", "cost_metrics"):
+            for field, result in comparison[section].items():
+                lines.append(
+                    "- `{}`: {} -> {} ({}%)".format(
+                        field,
+                        result["before"],
+                        result["after"],
+                        result["percent_change"],
+                    )
+                )
         return "\n".join(lines) + "\n"
     return (
         "# Codex usage snapshot\n\n"
+        "- Source coverage: {source_coverage[status]}\n"
+        "- Period closed: {period_closed}\n"
         "- Sessions: {sessions}\n"
         "- Child sessions: {child_sessions}\n"
         "- Model calls: {model_calls}\n"
         "- Input tokens: {input_tokens}\n"
         "- Cached input tokens: {cached_input_tokens}\n"
         "- Output tokens: {output_tokens}\n"
-        "- Estimated credits: {estimated_credits}\n"
+        "- Known-rate subtotal: {pricing[known_rate_subtotal]}\n"
+        "- Observed total: {pricing[observed_total]}\n"
     ).format(**value)
 
 
@@ -354,16 +671,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "snapshot":
-        target_date = date.fromisoformat(args.date)
-        paths, start, end = discover_paths(
-            args.codex_home, target_date, ZoneInfo(args.timezone)
+        result = snapshot_for_day(
+            args.codex_home,
+            args.date,
+            args.timezone,
         )
-        result = summarize_rollouts(paths, start=start, end=end)
-        result["complete_period"] = end <= datetime.now(timezone.utc)
-        result["period"] = {
-            "date": args.date,
-            "timezone": args.timezone,
-        }
         emit(result, args.format, args.output)
         return 0
 
@@ -371,7 +683,7 @@ def main() -> int:
     after = read_json(args.after)
     emit(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "comparison": compare_snapshots(
                 before, after, attested_comparable=args.attest_comparable
             ),

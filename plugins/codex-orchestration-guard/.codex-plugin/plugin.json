@@ -1,7 +1,7 @@
 {
   "name": "codex-orchestration-guard",
-  "version": "0.1.0",
-  "description": "Bounds Codex agent fan-out, scope drift, context growth, and local usage reporting.",
+  "version": "0.2.0",
+  "description": "Bounds local Codex delegation attempts and reports usage with source and pricing coverage.",
   "author": {
     "name": "Hashem Khalifa",
     "url": "https://github.com/HashemKhalifa"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Orchestration Guard",
-    "shortDescription": "Bound agent fan-out, context growth, and scope drift.",
-    "longDescription": "Adds local hooks that prevent recursive delegation, cap direct agents, and inject a one-outcome scope contract. Includes privacy-safe usage snapshots and comparisons.",
+    "shortDescription": "Bound delegation attempts and inspect local usage.",
+    "longDescription": "Adds local hooks that restrict recursive delegation, cap direct subagent attempts, and inject scope guidance. Includes local usage snapshots with explicit source and pricing coverage.",
     "developerName": "Hashem Khalifa",
     "category": "Productivity",
     "capabilities": [

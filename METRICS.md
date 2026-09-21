@@ -1,5 +1,7 @@
 # Initial usage evidence
 
+These historical schema-1 snapshots are retained unchanged. Version 0.2.0 identified that the old scanner could omit older running sessions and that unpriced models contributed zero to estimated credits. Treat the figures below as historical outputs of that implementation, not validated complete usage or current cost. Schema-2 comparisons reject these snapshots.
+
 This report separates measured facts from projections. The periods are not yet a controlled before-and-after experiment.
 
 ## Measured incident baseline
