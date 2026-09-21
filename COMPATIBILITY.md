@@ -1,4 +1,14 @@
-# Compatibility for 0.2.0
+# Compatibility
+
+## Chat approval in 0.3.0
+
+Approval uses a standalone root `UserPromptSubmit` message containing `[allow-sub-agent]=allow` (or `[allow-sub-agent]`). It never opens a dialog or waits. The next child creation consumes the session-scoped grant under the same lock as attempt accounting. Existing sessions without a grant deny delegation and continue to allow unrelated tools.
+
+Automated checks cover one-use approval, replayed messages and tool calls, concurrent consumption, child self-approval denial, blocked forwarding through recognized message tools, and the preserved policy limits. The prompt hook has no trusted operator-origin field, so the marker is not cryptographic or authenticated evidence of human approval.
+
+The native host interception evidence below remains the v0.2.0 evidence; it is not a new live agent launch in v0.3.0.
+
+## Host evidence from 0.2.0
 
 Validation used Codex CLI 0.154.0 on macOS and the hook's `/usr/bin/python3` interpreter (Python 3.9.6). The unit suite also passed on Python 3.14.7.
 

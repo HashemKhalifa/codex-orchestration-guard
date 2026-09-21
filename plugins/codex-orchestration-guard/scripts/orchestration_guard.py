@@ -20,11 +20,16 @@ LOCK_PATH = DATA_DIR / "state.lock"
 EVENTS_PATH = DATA_DIR / "events.jsonl"
 DIRECT_AGENT_LIMIT = 5
 AUTHORIZATION_MARKER = "[allow-agent-orchestration]"
+APPROVAL_MARKERS = {"[allow-sub-agent]=allow", "[allow-sub-agent]"}
 CHILD_PROMPT_MARKER = "[codex-agent-created-child:no-spawn]"
 RETENTION = timedelta(days=8)
 MAX_EVENTS_BYTES = 1024 * 1024
 RETAIN_EVENTS_BYTES = 512 * 1024
 SCOPE_CONTRACT = (
+    "Do work locally by default. Before delegating, describe one bounded child task "
+    "and let the operator approve it with a standalone [allow-sub-agent]=allow message. "
+    "Continue independent local work while approval is pending. Never send the approval "
+    "marker through tools or stop useful local work merely to wait for approval. "
     "Scope contract: deliver one requested outcome. Do not add adjacent refactors, "
     "extra audits, documentation, new tasks, or optional hardening unless the user "
     "asked for them or they are required to make the requested path work. Do not "
@@ -61,6 +66,21 @@ def orchestration_route(tool_name: Any) -> Optional[str]:
     if "spawnagent" in normalized:
         return "subagents"
     return None
+
+
+def is_approval_prompt(prompt: Any) -> bool:
+    return isinstance(prompt, str) and prompt.strip().lower() in APPROVAL_MARKERS
+
+
+def is_forwarded_approval(hook_input: Dict[str, Any]) -> bool:
+    name = hook_input.get("tool_name")
+    arguments = hook_input.get("tool_input")
+    if not isinstance(name, str) or not isinstance(arguments, dict):
+        return False
+    normalized = re.sub(r"[^a-z0-9]", "", name.lower())
+    return any(part in normalized for part in ("sendmessage", "followuptask")) and any(
+        is_approval_prompt(arguments.get(key)) for key in ("prompt", "message")
+    )
 
 
 def deny(reason: str) -> Dict[str, Any]:
@@ -115,6 +135,7 @@ def allow_thread_creation(tool_input: Any) -> Dict[str, Any]:
     prompt = re.sub(
         re.escape(AUTHORIZATION_MARKER), "", prompt, flags=re.IGNORECASE
     ).lstrip()
+    prompt = re.sub(r"\[allow-sub-agent\](?:=allow)?", "", prompt, flags=re.IGNORECASE).lstrip()
     if CHILD_PROMPT_MARKER not in prompt:
         prompt = "{}\n{}".format(CHILD_PROMPT_MARKER, prompt)
     updated["prompt"] = prompt
@@ -174,7 +195,9 @@ def relevant_event(hook_input: Dict[str, Any]) -> bool:
         return True
     if event_name == "UserPromptSubmit":
         prompt = hook_input.get("prompt")
-        return isinstance(prompt, str) and CHILD_PROMPT_MARKER in prompt
+        return isinstance(prompt, str) and (
+            CHILD_PROMPT_MARKER in prompt or is_approval_prompt(prompt)
+        )
     if event_name == "SubagentStart":
         return isinstance(hook_input.get("agent_id"), str) and bool(
             hook_input.get("agent_id")
@@ -210,6 +233,17 @@ def valid_state(state: Any) -> bool:
         if tool_use_ids is not None and (
             not isinstance(tool_use_ids, list)
             or any(not isinstance(item, str) or not item for item in tool_use_ids)
+        ):
+            return False
+        approval = record.get("delegation_approved")
+        if approval is not None and type(approval) is not bool:
+            return False
+        approval_turn_ids = record.get("approval_turn_ids", [])
+        if (
+            not isinstance(approval_turn_ids, list)
+            or any(not isinstance(item, str) or not item for item in approval_turn_ids)
+            or len(set(approval_turn_ids)) != len(approval_turn_ids)
+            or (approval is True and not approval_turn_ids)
         ):
             return False
         if tool_use_ids is not None and (
@@ -307,6 +341,26 @@ def handle_event(
             and session_id is not None
         ):
             record_child(state, session_id, "agent-created-task", now)
+        if is_approval_prompt(prompt):
+            turn_id = reported_identity(hook_input.get("turn_id"))
+            if (
+                transcript_session_id is None or turn_id is None or transcript_depth > 0
+                or session_id in state.get("child_threads", {})
+            ):
+                return {"systemMessage": "Codex orchestration guard: approval requires an identified root session and turn."}
+            record = session_record(state, session_id, now)
+            seen = record.setdefault("approval_turn_ids", [])
+            if turn_id not in seen:
+                seen.append(turn_id)
+                record["delegation_approved"] = True
+            return {"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": (
+                    "One-use delegation approval is available for this root. It authorizes one child only, within the existing limits. Repeated approval messages do not accumulate a batch allowance."
+                    if record.get("delegation_approved") is True else
+                    "This approval message was already consumed. Continue locally; it grants no further delegation."
+                ),
+            }}
         return {}
 
     if event_name == "SubagentStart":
@@ -379,6 +433,14 @@ def handle_event(
                 "Codex orchestration guard: this root already started five direct "
                 "attempts. Reuse an existing agent."
             )
+    if record.get("delegation_approved") is not True:
+        return deny(
+            "Codex orchestration guard: delegation requires a standalone operator message "
+            "[allow-sub-agent]=allow. Continue useful work locally while approval is pending. "
+            "Do not retry, send the marker through tools, or switch to another delegation route."
+        )
+    record["delegation_approved"] = False
+    if route == "subagents":
         record["direct_agent_spawns"] = count + 1
         if tool_use_id is not None:
             tool_use_ids.append(tool_use_id)
@@ -462,6 +524,9 @@ def read_input() -> Dict[str, Any]:
 
 def main() -> int:
     hook_input = read_input()
+    if hook_input.get("hook_event_name") == "PreToolUse" and is_forwarded_approval(hook_input):
+        print(json.dumps(deny("Codex orchestration guard: agents cannot forward operator approval markers.")))
+        return 0
     if not relevant_event(hook_input):
         print("{}")
         return 0

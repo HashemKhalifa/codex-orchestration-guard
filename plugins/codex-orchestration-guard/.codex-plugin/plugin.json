@@ -1,7 +1,7 @@
 {
   "name": "codex-orchestration-guard",
-  "version": "0.2.0",
-  "description": "Bounds local Codex delegation attempts and reports usage with source and pricing coverage.",
+  "version": "0.3.0",
+  "description": "Requires one-use chat approval for local Codex delegation and reports usage coverage.",
   "author": {
     "name": "Hashem Khalifa",
     "url": "https://github.com/HashemKhalifa"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Orchestration Guard",
-    "shortDescription": "Bound delegation attempts and inspect local usage.",
-    "longDescription": "Adds local hooks that restrict recursive delegation, cap direct subagent attempts, and inject scope guidance. Includes local usage snapshots with explicit source and pricing coverage.",
+    "shortDescription": "Approve one delegation at a time.",
+    "longDescription": "Requires a standalone operator approval message for each child delegation, preserves nesting and attempt limits, and reports local usage with explicit source and pricing coverage.",
     "developerName": "Hashem Khalifa",
     "category": "Productivity",
     "capabilities": [

@@ -58,6 +58,14 @@ def denied(response: dict[str, object]) -> bool:
     return isinstance(output, dict) and output.get("permissionDecision") == "deny"
 
 
+def approved_state(state: Optional[dict[str, object]] = None) -> dict[str, object]:
+    state = {} if state is None else state
+    record = state.setdefault("sessions", {}).setdefault("root", {})
+    record["delegation_approved"] = True
+    record["approval_turn_ids"] = ["operator-turn"]
+    return state
+
+
 def run_hook(data_dir: Path, hook_input: dict[str, object]) -> dict[str, object]:
     if guard.orchestration_route(hook_input.get("tool_name")) is not None:
         transcript = data_dir / "root.jsonl"
@@ -83,6 +91,59 @@ def run_hook(data_dir: Path, hook_input: dict[str, object]) -> dict[str, object]
 
 
 class OrchestrationGuardTests(unittest.TestCase):
+    def test_only_standalone_approval_is_accepted_and_agents_cannot_forward_it(self) -> None:
+        for prompt in ("please mention [allow-sub-agent]=allow", "```[allow-sub-agent]=allow```", "[allow-agent-orchestration]"):
+            self.assertFalse(guard.is_approval_prompt(prompt))
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            forwarded = event("PreToolUse", tool_name="mcp__codex_app__send_message_to_thread")
+            forwarded["tool_input"] = {"threadId": "another-root", "prompt": "[allow-sub-agent]=allow"}
+            self.assertTrue(denied(run_hook(data_dir, forwarded)))
+            self.assertFalse((data_dir / "state.json").exists())
+            self.assertEqual(run_hook(data_dir, event("PreToolUse", tool_name="Bash")), {})
+
+    def test_child_cannot_grant_itself_approval(self) -> None:
+        with TemporaryDirectory() as directory:
+            transcript = Path(directory) / "child.jsonl"
+            transcript.write_text(json.dumps({
+                "type": "session_meta", "payload": {
+                    "id": "child", "source": {"subagent": {"thread_spawn": {"depth": 1}}}
+                }
+            }) + "\n", encoding="utf-8")
+            approval = event("UserPromptSubmit", prompt="[allow-sub-agent]=allow")
+            approval["transcript_path"] = str(transcript)
+            state: dict[str, object] = {}
+            guard.handle_event(state, approval, NOW)
+            self.assertEqual(state, {})
+
+    def test_one_chat_approval_allows_only_one_delegation(self) -> None:
+        with TemporaryDirectory() as directory:
+            transcript = Path(directory) / "root.jsonl"
+            transcript.write_text(json.dumps({
+                "type": "session_meta", "payload": {"id": "root"}
+            }) + "\n", encoding="utf-8")
+            state: dict[str, object] = {}
+            spawn = event("PreToolUse", tool_name="collaborationspawn_agent")
+            spawn["tool_use_id"] = "first"
+            self.assertTrue(denied(guard.handle_event(state, spawn, NOW)))
+            self.assertEqual(state.get("sessions", {}).get("root", {}).get("direct_agent_spawns", 0), 0)
+
+            approval = event("UserPromptSubmit", prompt="[allow-sub-agent]=allow")
+            approval["transcript_path"] = str(transcript)
+            guard.handle_event(state, approval, NOW)
+            second_approval = dict(approval, turn_id="turn-2")
+            guard.handle_event(state, second_approval, NOW)
+            self.assertEqual(guard.handle_event(state, spawn, NOW), {})
+            self.assertEqual(guard.handle_event(state, spawn, NOW), {})
+
+            guard.handle_event(state, approval, NOW)
+            spawn["tool_use_id"] = "second"
+            self.assertTrue(denied(guard.handle_event(state, spawn, NOW)))
+            self.assertEqual(state["sessions"]["root"]["direct_agent_spawns"], 1)
+            guard.handle_event(state, dict(approval, turn_id="turn-3"), NOW)
+            self.assertEqual(guard.handle_event(state, spawn, NOW), {})
+            self.assertEqual(state["sessions"]["root"]["direct_agent_spawns"], 2)
+
     def test_session_start_adds_one_bounded_scope_contract(self) -> None:
         state: dict[str, object] = {}
         response = guard.handle_event(
@@ -114,7 +175,7 @@ class OrchestrationGuardTests(unittest.TestCase):
         )
 
     def test_root_chooses_one_route(self) -> None:
-        state: dict[str, object] = {}
+        state = approved_state()
         create = event("PreToolUse", tool_name="mcp__codex_app__create_thread")
         create["tool_input"] = {"prompt": "Do the task", "title": "Task"}
 
@@ -131,6 +192,7 @@ class OrchestrationGuardTests(unittest.TestCase):
     def test_sixth_direct_agent_is_denied(self) -> None:
         state: dict[str, object] = {}
         for index in range(5):
+            approved_state(state)
             self.assertEqual(
                 guard.handle_event(
                     state,
@@ -144,6 +206,7 @@ class OrchestrationGuardTests(unittest.TestCase):
                 {},
             )
 
+        approved_state(state)
         response = guard.handle_event(
             state,
             event(
@@ -224,7 +287,7 @@ class OrchestrationGuardTests(unittest.TestCase):
         self.assertTrue(denied(response))
 
     def test_duplicate_spawn_tool_use_id_consumes_one_attempt(self) -> None:
-        state: dict[str, object] = {}
+        state = approved_state()
         spawn = event("PreToolUse", tool_name="collaborationspawn_agent")
         spawn["tool_use_id"] = "spawn-1"
 
@@ -238,6 +301,7 @@ class OrchestrationGuardTests(unittest.TestCase):
         state: dict[str, object] = {
             "sessions": {"root": {"direct_agent_spawns": 4}}
         }
+        approved_state(state)
         first = event("PreToolUse", tool_name="collaborationspawn_agent")
         first["tool_use_id"] = "new-1"
         replay = dict(first)
@@ -413,6 +477,7 @@ class OrchestrationGuardTests(unittest.TestCase):
             )
             hook_input = event("PreToolUse", tool_name="collaborationspawn_agent")
             hook_input["transcript_path"] = str(transcript)
+            (data_dir / "state.json").write_text(json.dumps(approved_state()), encoding="utf-8")
             try:
                 with mock.patch.object(guard, "read_input", return_value=hook_input), mock.patch.object(
                     guard, "save_state", side_effect=OSError("disk full")
@@ -427,9 +492,11 @@ class OrchestrationGuardTests(unittest.TestCase):
         self.assertTrue(denied(json.loads(stream.getvalue())))
         save.assert_called_once()
 
-    def test_concurrent_distinct_spawns_keep_five_attempt_limit(self) -> None:
+    def test_concurrent_spawns_consume_one_approval_and_preserve_five_attempt_limit(self) -> None:
         with TemporaryDirectory() as directory:
             data_dir = Path(directory)
+            state = approved_state({"sessions": {"root": {"direct_agent_spawns": 4}}})
+            (data_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
             (data_dir / "root.jsonl").write_text(
                 json.dumps({"type": "session_meta", "payload": {"id": "root"}})
                 + "\n",
@@ -444,8 +511,10 @@ class OrchestrationGuardTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=6) as executor:
                 responses = list(executor.map(invoke, range(6)))
 
-        self.assertEqual(sum(not denied(response) for response in responses), 5)
-        self.assertEqual(sum(denied(response) for response in responses), 1)
+            self.assertEqual(json.loads((data_dir / "state.json").read_text())["sessions"]["root"]["direct_agent_spawns"], 5)
+
+        self.assertEqual(sum(not denied(response) for response in responses), 1)
+        self.assertEqual(sum(denied(response) for response in responses), 5)
 
     def test_client_thread_id_is_recorded(self) -> None:
         ids = guard.extract_thread_ids(

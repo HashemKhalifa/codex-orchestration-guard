@@ -9,11 +9,16 @@ Inspect the installed version and hook trust before relying on policy enforcemen
 
 ## Runtime policy
 
+- Work locally by default. Describe a bounded child task before delegation, and let the operator authorize it with a standalone `[allow-sub-agent]=allow` message in the same task. `[allow-sub-agent]` is also accepted.
+- Continue useful independent work while approval is pending. Never wait, poll, retry blocked launches, or send the marker through tools to grant yourself approval.
+- One message grants one child creation on the chosen route. It does not stack, does not authorize a batch, and does not override the limits below.
+- Chat markers are workflow signals, not authenticated human identity. Do not claim a security boundary or guaranteed usage savings.
+
 - One delegation route per retained root session, task threads or native subagents.
 - Five permitted direct subagent attempts, without worker/reviewer classification.
 - Known children cannot delegate. Unresolved identity blocks delegation.
 - Stable spawn call IDs deduplicate accounting. Missing IDs count as attempts. Failed or ambiguous outcomes do not refund attempts.
-- Prompt markers, including `[allow-agent-orchestration]`, do not grant exceptions in 0.2.0.
+- The old `[allow-agent-orchestration]` exception remains unsupported. The new one-use marker grants permission within the limits, never an exception.
 - Scope text is guidance. Hooks are local guardrails, not a complete security boundary.
 
 Preserve existing counters and routes on upgrade. Treat malformed retained state as an error, not permission to erase the store. Do not modify configuration unless the user requests it.

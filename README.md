@@ -1,9 +1,10 @@
 # Codex Orchestration Guard
 
-Local Codex hooks restrict recursive delegation, cap direct subagent attempts, and add scope guidance. An offline command reports local usage with source and pricing coverage.
+Local Codex hooks require one-use chat approval for delegation, restrict recursive delegation, cap direct subagent attempts, and add scope guidance. An offline command reports local usage with source and pricing coverage.
 
 ## Policy
 
+- Each new child requires one unused chat approval in its root session. Ordinary work is not blocked while approval is pending.
 - Each retained root session chooses task threads or native subagents. It cannot mix routes.
 - A root can make five permitted direct subagent attempts. The guard does not classify workers or reviewers and does not cap the task-thread route.
 - Known children cannot delegate again. Unresolved actor identity blocks delegation.
@@ -12,7 +13,25 @@ Local Codex hooks restrict recursive delegation, cap direct subagent attempts, a
 
 The policy depends on Codex invoking the hook and supplying recognizable events. It is not an account-wide limit or a security boundary against an agent that can modify local files or use unsupported tool paths.
 
-## Upgrade to 0.2.0
+## Upgrade to 0.3.0
+
+Work locally by default. When an agent proposes a bounded delegation, approve one child by sending this as a standalone message in that same task:
+
+```text
+[allow-sub-agent]=allow
+```
+
+`[allow-sub-agent]` is also accepted. The next child creation consumes the approval, whether the selected route uses a native subagent or a Codex task. Repeated approval messages do not build up a batch allowance, and replaying the same message cannot grant another launch. Another child needs another approval message. Failed launches do not refund the approval.
+
+There is no popup, blocking wait, polling loop, or background process. The guard blocks only unapproved delegation; the assistant is instructed to continue independent local work. The guard cannot force an assistant to keep working. If delegation is the only remaining action, it still requires your approval.
+
+Approval never bypasses the nesting, route, or five-attempt limits. Quoted examples and messages containing additional prose do not grant approval. Child sessions cannot approve themselves. Recognized agent message tools cannot forward a standalone approval marker; child creation prompts have markers stripped.
+
+The marker is a local workflow control, not authenticated proof of human identity. Codex's prompt hook does not expose a trusted operator-origin field. Unsupported message paths or software that can change local files can bypass these local controls. Do not claim an account-wide security or spending boundary.
+
+Existing state migrates with no pending approval. An unused approval is scoped to its retained root session and follows the existing eight-day state retention.
+
+## Earlier changes in 0.2.0
 
 `[allow-agent-orchestration]` no longer grants an exception. Prompt text cannot establish operator origin, and agent-sent follow-ups must not acquire authority by containing a marker. This is a deliberate behavior change from 0.1.0.
 
